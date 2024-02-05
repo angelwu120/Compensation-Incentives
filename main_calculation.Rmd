@@ -300,5 +300,8 @@ df_firm_level = df_exe_level %>% group_by(GVKEY, year) %>% summarise(
   vega = mean(newRopt, na.rm = T)
 )
 ```
-
+## Output
+```{r}
+save(df_firm_level, df_exe_level, file = "comp_inventive.RData")
+```
 
