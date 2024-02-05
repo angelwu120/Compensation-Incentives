@@ -1,0 +1,304 @@
+---
+title: "R Notebook"
+---
+
+```{r}
+library(dplyr)
+library(expss)
+library(lubridate)
+library(zoo)
+```
+## Map CSRP and COMPUSTAT
+```{r}
+df_merge = read.csv("csrp_compustat_link.csv")
+```
+
+```{r}
+df_merge %>% group_by(cusip) %>% summarise(n_gvkey = n_distinct(gvkey)) %>% filter(n_gvkey>1)
+```
+
+```{r}
+#write.table(df_merge$cusip, file = "cusip_9digit.txt", row.names = F, col.names = F)
+
+df_cusip8 = read.csv("cusip_8digit.csv")
+df_cusip9 = as.data.frame(sort(unique(df_merge$cusip)))
+df_cusip9$cusip_9digit = df_cusip9$`sort(unique(df_merge$cusip))`
+df_cusip9$`sort(unique(df_merge$cusip))` = NULL
+df_cusip9$cusip_8digit = df_cusip8$cusip
+
+df_merge$cusip_8digit = vlookup(df_merge$cusip, df_cusip9, result_column = "cusip_8digit", lookup_column = "cusip_9digit")
+```
+
+## Calculate monthly stock return volatility
+```{r}
+# stock monthly return data from CRSP
+df_return = read.csv("stock_monthly_return.csv")
+```
+
+
+```{r}
+# link gvkey for CRSP data
+df_return$gvkey = vlookup(df_return$CUSIP, df_merge, lookup_column = "cusip_8digit", result_column = "gvkey")
+summary(df_return$gvkey)
+length(unique(subset(df_return$CUSIP, is.na(df_return$gvkey))))
+
+# year 
+df_return$year = year(as.Date(df_return$date))
+summary(df_return$year)
+
+df_return$month = month(as.Date(df_return$date))
+summary(df_return$month)
+```
+
+# SIGMA
+```{r}
+# Use annualized standard deviation of stock returns estimated over the 60 months prior to the beginning of the fiscal period;
+#  std
+df_return$return = as.numeric(df_return$RET)
+summary(df_return$return)
+df_return$return[is.na(df_return$return)] = 0
+
+df_return = df_return %>%
+  group_by(gvkey) %>%
+  mutate(std_60obs = zoo::rollapplyr(return, 60, sd, fill = NA))
+
+#df_return_vola = df_return %>% group_by(gvkey, year) %>% summarise(vola = sd(as.numeric(RET), na.rm = T))
+
+df_return_vola = df_return %>% group_by(gvkey, year) %>% summarise(sigma = mean(std_60obs * (12^(1/2))))
+
+df_return_vola = na.omit(df_return_vola)
+
+summary(df_return_vola$sigma)
+
+sigma_95 = quantile(df_return_vola$sigma, 0.95)
+
+df_return_vola$sigma[df_return_vola$sigma>sigma_95] = sigma_95
+```
+
+## Recreate riskfree_rate table;
+```{r}
+# bond data from CRSP
+riskfree_rate = read.csv("risk_free_rate.csv")
+summary(riskfree_rate)
+```
+
+```{r}
+# year
+riskfree_rate$year = year(as.Date(riskfree_rate$caldt))
+
+# rate
+riskfree_rate$oneyr=riskfree_rate$b1ret;
+riskfree_rate$twoyr=riskfree_rate$b2ret;
+riskfree_rate$fiveyr=riskfree_rate$b5ret;
+riskfree_rate$sevenyr=riskfree_rate$b7ret;
+riskfree_rate$tenyr=riskfree_rate$b10ret;
+
+riskfree_rate$threeyr=riskfree_rate$twoyr+(riskfree_rate$fiveyr-riskfree_rate$twoyr)/3;
+riskfree_rate$fouryr=riskfree_rate$twoyr+(riskfree_rate$fiveyr-riskfree_rate$twoyr)/3*2;
+riskfree_rate$sixyr=riskfree_rate$fiveyr+(riskfree_rate$sevenyr-riskfree_rate$fiveyr)/2;
+riskfree_rate$eightyr=riskfree_rate$sevenyr+(riskfree_rate$tenyr-riskfree_rate$sevenyr)/3;
+riskfree_rate$nineyr=riskfree_rate$sevenyr+(riskfree_rate$tenyr-riskfree_rate$sevenyr)/3*2
+```
+
+## Load Compustat annual data
+```{r}
+df_comp = read.csv("compustat.csv")
+```
+## BS_YIELD
+```{r}
+# (i) use the average of DIVYIELD provided by Execuomp over the current year and the two prior years and (ii) winsorize the values at the 5th and 95th levels.
+
+df_comp['mkvalt'] = df_comp['csho'] * df_comp['prcc_f']
+df_comp['dvt_mval_ratio'] = df_comp['dvt']/df_comp['mkvalt']
+
+df_comp$dvt_mval_ratio[is.infinite(df_comp$dvt_mval_ratio)] = NA
+summary(df_comp$dvt_mval_ratio)
+
+df_comp = df_comp %>% group_by(gvkey) %>% mutate(bs_yield = zoo::rollapplyr(dvt_mval_ratio, 3, mean, fill = NA) )
+
+df_comp_dv = df_comp %>% group_by(gvkey, fyear) %>% summarise(bs_yield = mean(bs_yield))
+
+#yield_95 = quantile(df_comp_dv$bs_yield, 0.95, na.rm = T)
+#yield_5 = quantile(df_comp_dv$bs_yield, 0.05, na.rm = T)
+
+df_comp_dv$bs_yield[df_comp_dv$bs_yield>yield_95] = yield_95
+df_comp_dv$bs_yield[df_comp_dv$bs_yield<yield_5] = yield_5
+summary(df_comp_dv$bs_yield)
+```
+
+
+## Load Execomp data - Outstanding Equity Awards
+```{r}
+df_outstanding = read.csv("outstanding_awards.csv")
+```
+
+
+```{r}
+df_outstanding$exyear = year(as.Date(df_outstanding$EXDATE))
+summary(df_outstanding$exyear)
+
+df_outstanding$maturity_yearend = df_outstanding$exyear - df_outstanding$YEAR
+
+df_outstanding$maturity_yearend[is.na(df_outstanding$maturity_yearend)] = 10
+df_outstanding$maturity_yearend[df_outstanding$maturity_yearend>10] = 10
+
+summary(df_outstanding$maturity_yearend)
+```
+
+
+## merge risk-free rate data
+```{r}
+riskfree_rate$year = year(as.Date(riskfree_rate$caldt))
+df = merge(df_outstanding, riskfree_rate, by.x = "YEAR", by.y = "year", all.x = T)
+```
+
+```{r, warning = F}
+df$rfc = NA
+df$rfc[df$maturity_yearend ==1 ] = df$oneyr
+df$rfc[df$maturity_yearend ==2 ] = df$twoyr
+df$rfc[df$maturity_yearend ==3 ] = df$threeyr
+df$rfc[df$maturity_yearend ==4 ] = df$fouryr
+df$rfc[df$maturity_yearend ==5 ] = df$fiveyr
+df$rfc[df$maturity_yearend ==6 ] = df$sixyr
+df$rfc[df$maturity_yearend ==7 ] = df$sevenyr
+df$rfc[df$maturity_yearend ==8 ] = df$eightyr
+df$rfc[df$maturity_yearend ==9 ] = df$nineyr
+df$rfc[df$maturity_yearend ==10 ] = df$tenyr
+summary(df$rfc)
+```
+
+```{r}
+df$year = df$YEAR
+df$gvkey = df$GVKEY
+df$sigma = NULL
+df = merge(df, df_return_vola, by = c("gvkey", "year"))
+```
+
+```{r}
+df_comp_dv$year = df_comp_dv$fyear
+df = merge(df, df_comp_dv, by = c("gvkey", "year"))
+```
+
+```{r}
+colnames(df)
+```
+
+
+## CALCULATE INCENTIVES
+```{r}
+
+# exercise price;
+ df$Xc = df$EXPRIC
+summary(df$Xc)
+
+# calculate B-S values;
+df$maturity_yearend[df$maturity_yearend<0] = 0
+
+df = df %>% mutate(
+   Zc_yearend= (log(PRCCF/Xc)+ maturity_yearend * (rfc - bs_yield + (sigma^2)/2)) / (sigma * sqrt( maturity_yearend))
+)
+summary(df$Zc_yearend)
+
+df$Zc_yearend[is.infinite(df$Zc_yearend)] = NA
+
+# computing deltas;
+df$opts_unvested_num = df$OPTS_UNEX_UNEXER
+
+df = df %>% mutate(
+ Sunvest_yearend= exp(-bs_yield*maturity_yearend)*pnorm(Zc_yearend)*opts_unvested_num*PRCCF/100)
+summary(df$Sunvest_yearend)
+
+df$opts_vested_num = df$OPTS_UNEX_EXER
+
+df = df %>% mutate(
+ Svest_yearend= exp(-bs_yield*maturity_yearend)*pnorm(Zc_yearend)*opts_vested_num*PRCCF/100)
+summary(df$Svest_yearend)
+
+```
+
+```{r}
+# Black Scholes value of options at yearend;
+df = df %>% mutate(
+ Vunvest_yearend= opts_unvested_num * (PRCCF * exp(-bs_yield * maturity_yearend) * pnorm(Zc_yearend)
+    - Xc * exp(-rfc * maturity_yearend) * pnorm(Zc_yearend - sigma * sqrt( maturity_yearend))),
+ Vvest_yearend= opts_vested_num * (PRCCF * exp(-bs_yield * maturity_yearend) * pnorm(Zc_yearend)
+    -Xc * exp(-rfc * maturity_yearend) * pnorm(Zc_yearend - sigma * sqrt( maturity_yearend)))
+)
+```
+
+
+```{r}
+# sensitivity with respect to a 0.01 change in stock return volatility;
+df = df %>% mutate(
+   Runvest_yearend = exp(-bs_yield* maturity_yearend)*dnorm(Zc_yearend)*PRCCF*sqrt( maturity_yearend)*0.01*opts_unvested_num,
+   
+   Rvest_yearend = exp(-bs_yield* maturity_yearend)*dnorm(Zc_yearend)*PRCCF*sqrt( maturity_yearend)*0.01*opts_vested_num
+)
+
+```
+
+## Aggregate to executive level
+```{r}
+
+df_exe_level = df %>% group_by(CO_PER_ROL, year) %>% summarise(
+ sumunvested_num_opts = sum(opts_unvested_num, na.rm = T),
+ sumvested_num_opts = sum(opts_vested_num, na.rm = T),
+ sumSunvest_yearend = sum(Sunvest_yearend, na.rm = T),
+ sumSvest_yearend = sum(Svest_yearend, na.rm = T),
+ sumRunvest_yearend = sum(Runvest_yearend, na.rm = T),
+ sumRvest_yearend = sum(Rvest_yearend, na.rm = T),
+ sumVunvest_yearend = sum(Vunvest_yearend, na.rm = T),
+ sumVvest_yearend = sum(Vvest_yearend, na.rm = T) ,
+ prccf = mean(PRCCF, na.rm = T)
+)
+```
+
+## Load Execomp data
+```{r}
+df_execomp = read.csv("execomp.csv")
+```
+
+```{r}
+df_execomp$shrown = df_execomp$SHROWN_EXCL_OPTS 
+```
+
+```{r}
+df_execomp$year = df_execomp$YEAR
+df_exe_level = merge(df_exe_level, df_execomp, by = c("CO_PER_ROL", "year"))
+```
+
+```{r}
+# vega;
+df_exe_level = df_exe_level %>% mutate(
+  newRopt = sumRvest_yearend + sumRunvest_yearend)
+summary(df_exe_level$newRopt)
+
+# sensitivity of shareholdings;
+df_exe_level = df_exe_level %>% mutate(
+ Sshr= shrown*prccf/100)
+summary(df_exe_level$Sshr)
+
+# value of shareholdings;
+df_exe_level = df_exe_level %>% mutate(
+ newVshr= shrown*prccf,
+ newVportfolio_yearend = sumVvest_yearend + sumVunvest_yearend + newVshr)
+summary(df_exe_level$newVshr)
+
+# delta;
+df_exe_level = df_exe_level %>% mutate(
+  newdelta = sumSvest_yearend + sumSunvest_yearend + Sshr,
+  newoptiondelta = sumSvest_yearend + sumSunvest_yearend,
+  newsharedelta = Sshr)
+
+summary(df_exe_level$newoptiondelta)
+```
+
+## Aggregate to firm level
+```{r}
+df_firm_level = df_exe_level %>% group_by(GVKEY, year) %>% summarise(
+  delta = mean(newdelta, na.rm = T),
+  vega = mean(newRopt, na.rm = T)
+)
+```
+
+
